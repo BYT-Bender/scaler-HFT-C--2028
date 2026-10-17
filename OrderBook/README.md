@@ -84,7 +84,7 @@ cmake --build build -j"$(nproc)"
 
 This generates the following binaries in `build/`:
 - `bench`: Unified benchmark and correctness verification tool.
-- `verify`: Unit test suite and standalone correctness checker.
+- `verify`: Standalone correctness checker.
 - `OrderBook`: Default executable demo.
 - `OrderBookA`, `OrderBookB`, `OrderBookC`: Standalone implementation demos.
 
@@ -97,12 +97,11 @@ The verification command validates all five API methods across all three impleme
 ```bash
 # Cross-implementation validation on 100,000 operations
 ./build/bench --verify --ops 100000 --seed 42
-
-# Unit test suite + random operation verification
-./build/verify --verify --ops 100000
 ```
 
 The verification harness checks the exact requested operation count and returns exit code `0` on success and a nonzero code on failure.
+
+![Correctness Verification](screenshots/verification/correctness.png)
 
 ---
 
@@ -123,37 +122,49 @@ Run each implementation on the required 1,000,000-operation workload (5 runs, me
 
 > [!WARNING]
 > **Implementation C Scalability Limitation (1,000,000 Operations)**:  
-> Because Implementation C performs an $O(N)$ linear traversal across all resting orders on every `add_order`, total execution time scales quadratically as $O(N^2)$. An attempt to benchmark 1,000,000 operations for C was run in WSL; live performance sampling revealed an IPC of **0.015** due to severe DRAM cache misses, requiring an estimated **~2.0 hours per run (~10.1 hours for 5 runs)**. It could not complete within practical benchmarking limits and is explicitly reported as **UNAVAILABLE**. An auxiliary 100,000-operation run was measured to characterize its performance. Consequently, the 1,000,000-operation requirement for Implementation C remains a **known architectural limitation and unmet submission requirement**. Detailed measurements and analysis are in [benchmark.md](benchmark.md).
+> Because Implementation C performs an $O(N)$ linear traversal across all resting orders on every `add_order`, total execution time scales quadratically as $O(N^2)$. Running 1,000,000 operations requires an estimated **~2.0 hours per run (~10.0 hours for 5 runs)** due to massive L1/L2 cache misses and DRAM stalls (IPC 0.11). It could not complete within practical benchmarking limits and is explicitly reported as **UNAVAILABLE**. An auxiliary 100,000-operation run was measured to characterize its performance. Consequently, the 1,000,000-operation requirement for Implementation C remains a **known architectural limitation and unmet submission requirement**. Detailed measurements and analysis are in [benchmark.md](benchmark.md).
 
-### Median Performance Summary (1,000,000 Operations)
+### Median Performance Summary (Measured on Student's Machine)
 
 | Implementation | 1M Workload Status | Total Time | ns / Add | ns / Cancel | ns / BBO | Checksum |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **A (`std::map`)** | **Completed** | 241.67 ms | 186.0 ns | 432.9 ns | 21.4 ns | `4495793605` |
-| **B (`priority_queue`)** | **Completed** | **182.57 ms** | **114.5 ns** | **323.1 ns** | **20.3 ns** | `4495793605` |
+| **A (`std::map`)** | **Completed** | 158.09 ms | 125.7 ns | 242.8 ns | 19.4 ns | `4495793605` |
+| **B (`priority_queue`)** | **Completed** | **117.30 ms** | **74.2 ns** | **162.6 ns** | **19.4 ns** | `4495793605` |
 | **C (`std::list`, 1M)** | **UNAVAILABLE** | Infeasible (~2h/run) | Unavailable | Unavailable | Unavailable | Unavailable |
-| *C (`std::list`, 100k aux)* | *Auxiliary (100k)* | *4,483.51 ms* | *63,865.6 ns* | *194.8 ns* | *64.3 ns* | *404245593* |
+| *C (`std::list`, 100k aux)* | *Auxiliary (100k)* | *4,425.58 ms* | *63,040.9 ns* | *177.6 ns* | *61.9 ns* | *404245593* |
 
 ---
 
 ## 7. Linux `perf` Profiling
 
 ### Hardware Counters (`perf stat`)
-Collect the 9 requested performance counters:
+Hardware counter profiling was executed with 5 repetitions targeting the 9 counters required by `assignment.md`:
 
 ```bash
 perf stat -r 5 \
   -e task-clock,cycles,instructions,branches,branch-misses,cache-misses,L1-dcache-load-misses,dTLB-load-misses,page-faults \
   -- ./build/bench --impl A --ops 1000000 --runs 1 --seed 42
 ```
-*(Repeat with `--impl B` and `--impl C`).*
+*(Repeat for `--impl B` and `--impl C`).*
+
+| Metric | Implementation A (1M ops) | Implementation B (1M ops) | Implementation C (100k ops Aux) |
+| :--- | :---: | :---: | :---: |
+| **`IPC` (Instructions / Cycle)** | **0.81** | **0.89** | **0.11** |
+| **Branch Miss Rate (%)** | **5.57%** | **2.20%** | **0.13%** |
+| **`cache-misses`** | 6,016,766 | 5,477,174 | 726,901,506 |
+| **`L1-dcache-load-misses`** | 20,196,215 | 12,749,192 | 993,155,350 |
+| **`page-faults`** | 17,433 | 17,476 | 2,670 |
 
 ### Hotspot Callgraphs (`perf record` & `perf report`)
 Record callchains and inspect hotspots:
 
 ```bash
 perf record -g -o /var/tmp/perf_a.data -- ./build/bench --impl A --ops 1000000 --runs 1 --seed 42
-perf report --stdio -i /var/tmp/perf_a.data
+DEBUGINFOD_URLS="" perf report --stdio -i /var/tmp/perf_a.data --no-children | head -n 25
 ```
 
-For complete profiling data, counter tables, and section 11 performance questions, refer to [benchmark.md](benchmark.md).
+- **Implementation A**: Tree traversal `std::_Rb_tree::_M_lower_bound` and balancing in `add_order` (20.73%) and `cancel_order` (17.27%).
+- **Implementation B**: Hash indexing `_Mod_range_hashing` and table rehashing `_M_rehash` in `add_order` (19.47%); lazy deletion eliminates heap operations from cancellation.
+- **Implementation C**: Sequential node traversal in `add_order` accounts for **99.05%** of all execution cycles (50.00% bids + 48.95% asks).
+
+For complete profiling tables, counter breakdowns, and answers to Section 11 questions, refer to [benchmark.md](benchmark.md).
